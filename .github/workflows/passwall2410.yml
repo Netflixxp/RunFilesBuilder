@@ -10,6 +10,11 @@ name: Make Passwall run files for OpenWrt
 
 on:
   workflow_dispatch:
+    inputs:
+      target_openwrt_version:
+        description: 'Target OpenWrt version for LuCI IPKs (e.g., 24.10, 23.05). Leave empty to try auto-detect or generic.'
+        required: false
+        default: '24.10' # Default to 24.10 if not specified
 
 jobs:
   build:
@@ -35,6 +40,8 @@ jobs:
 
       - name: Download latest Passwall files
         id: download_files
+        env:
+          TARGET_OPENWRT_VERSION_INPUT: ${{ github.event.inputs.target_openwrt_version }}
         run: |
           mkdir -p downloads
           cd downloads
@@ -47,7 +54,6 @@ jobs:
           fi
 
           echo "Downloading architecture-specific dependency packages..."
-          # Download passwall_packages_ipk_x86_64.zip
           x86_64_zip_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | endswith("passwall_packages_ipk_x86_64.zip")) | .browser_download_url')
           if [ -n "$x86_64_zip_url" ] && [ "$x86_64_zip_url" != "null" ]; then
             echo "Downloading x86_64 dependencies: $x86_64_zip_url"
@@ -57,7 +63,6 @@ jobs:
             exit 1
           fi
 
-          # Download passwall_packages_ipk_aarch64_cortex-a53.zip
           aarch64_zip_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | endswith("passwall_packages_ipk_aarch64_cortex-a53.zip")) | .browser_download_url')
           if [ -n "$aarch64_zip_url" ] && [ "$aarch64_zip_url" != "null" ]; then
             echo "Downloading aarch64_cortex-a53 dependencies: $aarch64_zip_url"
@@ -67,62 +72,91 @@ jobs:
             exit 1
           fi
 
-          echo "Downloading LuCI IPK files..."
-          # Download Passwall LuCI App
-          # Regex attempts to match luci-XX.YY_luci-app-passwall... or luci-app-passwall_ (older format as fallback)
-          app_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-[0-9]+\\.[0-9]+_luci-app-passwall_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
-          if [ -z "$app_url" ] || [ "$app_url" == "null" ]; then # Fallback for older naming
+          # Use the input version, or default if empty
+          TARGET_OPENWRT_VERSION="${TARGET_OPENWRT_VERSION_INPUT:-24.10}" # Default to 24.10 if input is empty
+          echo "Attempting to download LuCI IPK files for OpenWrt version: $TARGET_OPENWRT_VERSION"
+
+          # Download Passwall LuCI App for the target OpenWrt version
+          app_url=$(echo "$release_json" | jq -r --arg ver "$TARGET_OPENWRT_VERSION" '.assets[] | select(.name | test("^luci-\\Q"+$ver+"\\E_luci-app-passwall_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
+
+          # Fallback 1: Try without specific version prefix if target version not found
+          if [ -z "$app_url" ] || [ "$app_url" == "null" ]; then
+             echo "Warning: Could not find LuCI App specifically for OpenWrt $TARGET_OPENWRT_VERSION. Trying generic name (luci-app-passwall_...)."
              app_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-app-passwall_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
+          fi
+          
+          # Fallback 2: Try a very generic pattern if still not found (e.g. if naming changes drastically)
+          if [ -z "$app_url" ] || [ "$app_url" == "null" ]; then
+             echo "Warning: Could not find LuCI App with generic name. Trying wider pattern (luci-.*luci-app-passwall.*)."
+             app_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-.*luci-app-passwall.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
           fi
 
           if [ -n "$app_url" ] && [ "$app_url" != "null" ]; then
             echo "Downloading LuCI App: $app_url"
             curl -LO "$app_url"
-            # Set output for the filename to extract version later
             app_filename=$(basename "$app_url")
-            echo "APP_FILENAME=$app_filename" >> $GITHUB_OUTPUT
+            echo "APP_FILENAME=$app_filename" >> $GITHUB_OUTPUT # Set for next step
             echo "Downloaded APP_FILENAME: $app_filename"
           else
-            echo "Error: Could not find luci-app-passwall IPK in the latest release."
+            echo "Error: Could not find a suitable luci-app-passwall IPK after all fallbacks."
             exit 1
           fi
 
-          # Download Passwall LuCI i18n (Chinese)
-          i18n_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-[0-9]+\\.[0-9]+_luci-i18n-passwall-zh-cn_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
-          if [ -z "$i18n_url" ] || [ "$i18n_url" == "null" ]; then # Fallback for older naming
+          # Download Passwall LuCI i18n (Chinese) for the target OpenWrt version
+          i18n_url=$(echo "$release_json" | jq -r --arg ver "$TARGET_OPENWRT_VERSION" '.assets[] | select(.name | test("^luci-\\Q"+$ver+"\\E_luci-i18n-passwall-zh-cn_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
+
+          # Fallback 1 for i18n
+          if [ -z "$i18n_url" ] || [ "$i18n_url" == "null" ]; then
+             echo "Warning: Could not find LuCI i18n specifically for OpenWrt $TARGET_OPENWRT_VERSION. Trying generic name (luci-i18n-passwall-zh-cn_...)."
              i18n_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-i18n-passwall-zh-cn_.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
           fi
-
+          
+          # Fallback 2 for i18n
+          if [ -z "$i18n_url" ] || [ "$i18n_url" == "null" ]; then
+             echo "Warning: Could not find LuCI i18n with generic name. Trying wider pattern (luci-.*luci-i18n-passwall-zh-cn.*)."
+             i18n_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("^luci-.*luci-i18n-passwall-zh-cn.*_all\\.ipk$")) | .browser_download_url' | head -n 1)
+          fi
+          
           if [ -n "$i18n_url" ] && [ "$i18n_url" != "null" ]; then
             echo "Downloading LuCI i18n: $i18n_url"
             curl -LO "$i18n_url"
           else
-            echo "Warning: Could not find luci-i18n-passwall-zh-cn IPK. Proceeding without it."
-            # Depending on requirements, you might want to 'exit 1' here too
+            echo "Warning: Could not find a suitable luci-i18n-passwall-zh-cn IPK. Proceeding without it."
           fi
           echo "Downloads complete. Files in $(pwd):"
           ls -l
 
-      - name: Extract OpenWrt version from LuCI IPK
+      - name: Extract OpenWrt version from LuCI IPK filename
         id: extract_owrt_version
         run: |
           app_filename="${{ steps.download_files.outputs.APP_FILENAME }}"
           echo "APP_FILENAME from previous step: $app_filename"
+          owrt_ver_from_filename="unknown" # Default
           if [[ "$app_filename" =~ ^luci-([0-9]+\.[0-9]+)_luci-app-passwall_.* ]]; then
-            openwrt_version="${BASH_REMATCH[1]}"
-            echo "OPENWRT_VERSION_FROM_IPK=$openwrt_version" >> $GITHUB_ENV
-            echo "Extracted OpenWrt version: $openwrt_version"
-          else
-            echo "Could not extract OpenWrt version from IPK filename '$app_filename'. Using default."
-            echo "OPENWRT_VERSION_FROM_IPK=unknown" >> $GITHUB_ENV # Or your preferred default like "24.10"
+            owrt_ver_from_filename="${BASH_REMATCH[1]}"
+          elif [[ "$app_filename" =~ ^luci-app-passwall_([0-9]+\.[0-9]+)_.* ]]; then # Another possible older pattern
+            owrt_ver_from_filename="${BASH_REMATCH[1]}"
           fi
+          
+          # Use input version if provided and valid, otherwise use extracted, otherwise default
+          final_owrt_version="${{ github.event.inputs.target_openwrt_version }}"
+          if [ -z "$final_owrt_version" ]; then # If input was empty
+            if [ "$owrt_ver_from_filename" != "unknown" ]; then
+              final_owrt_version="$owrt_ver_from_filename"
+            else
+              final_owrt_version="24.10" # Ultimate fallback if nothing else found
+            fi
+          fi
+
+          echo "OPENWRT_VERSION_FOR_RELEASE=$final_owrt_version" >> $GITHUB_ENV
+          echo "Using OpenWrt version for Release/Filename: $final_owrt_version"
+
 
       - name: Organize files for x86_64
         run: |
           mkdir -p passwall_x86_64/depends passwall_x86_64/main
           unzip downloads/passwall_packages_ipk_x86_64.zip -d passwall_x86_64/depends
           rm downloads/passwall_packages_ipk_x86_64.zip
-          # Copy all downloaded .ipk files that are not zips
           find downloads -maxdepth 1 -name "*.ipk" -exec cp {} passwall_x86_64/main/ \;
           echo "x86_64 main files:"
           ls passwall_x86_64/main/
@@ -132,10 +166,6 @@ jobs:
           mkdir -p passwall_aarch64/depends passwall_aarch64/main
           unzip downloads/passwall_packages_ipk_aarch64_cortex-a53.zip -d passwall_aarch64/depends
           rm downloads/passwall_packages_ipk_aarch64_cortex-a53.zip
-          # Copy all downloaded .ipk files that are not zips
-          # Ensure these are copied fresh and not from the previous step's potential leftovers if 'downloads' isn't cleaned
-          # Re-finding them is safer or clean 'downloads' of .ipk after x86_64 step
-          # For simplicity, assuming 'downloads' still has the .ipk files intended for main
           find downloads -maxdepth 1 -name "*.ipk" -exec cp {} passwall_aarch64/main/ \;
           echo "aarch64 main files:"
           ls passwall_aarch64/main/
@@ -152,10 +182,7 @@ jobs:
           fi
           echo "Installing dependencies from depends/ directory..."
           opkg install depends/*.ipk
-          if [ \$? -ne 0 ]; then
-              echo "Error: Failed to install dependency packages."
-              # exit 1 # You might want to allow continuing if some optional deps fail
-          fi
+          # Add error check if needed, e.g. if [ \$? -ne 0 ]; then echo "Error installing deps"; exit 1; fi
           echo "Installing main packages from main/ directory..."
           opkg install main/*.ipk
           if [ \$? -ne 0 ]; then
@@ -176,14 +203,14 @@ jobs:
       - name: Create self-extracting packages
         run: |
           cd makeself
-          owrt_version_suffix="${{ env.OPENWRT_VERSION_FROM_IPK }}"
-          if [ "$owrt_version_suffix" == "unknown" ] || [ -z "$owrt_version_suffix" ]; then
-            owrt_version_suffix_for_filename="" # Or e.g., "_openwrt"
-          else
-            owrt_version_suffix_for_filename="_openwrt${owrt_version_suffix}"
+          owrt_version_suffix="${{ env.OPENWRT_VERSION_FOR_RELEASE }}"
+          filename_version_tag=""
+          if [ "$owrt_version_suffix" != "unknown" ] && [ -n "$owrt_version_suffix" ]; then
+            filename_version_tag="_openwrt${owrt_version_suffix}"
           fi
-          ./makeself.sh passwall_x86_64/ passwall_x86_64${owrt_version_suffix_for_filename}_${{ env.LATEST_TAG }}.run "Passwall for x86_64 (OpenWrt ${owrt_version_suffix}) by GitHub Action" ./install.sh
-          ./makeself.sh passwall_aarch64/ passwall_aarch64_a53${owrt_version_suffix_for_filename}_${{ env.LATEST_TAG }}.run "Passwall for aarch64_cortex-a53 (OpenWrt ${owrt_version_suffix}) by GitHub Action" ./install.sh
+          
+          ./makeself.sh passwall_x86_64/ passwall_x86_64${filename_version_tag}_${{ env.LATEST_TAG }}.run "Passwall for x86_64 (OpenWrt ${owrt_version_suffix}) by GitHub Action" ./install.sh
+          ./makeself.sh passwall_aarch64/ passwall_aarch64_a53${filename_version_tag}_${{ env.LATEST_TAG }}.run "Passwall for aarch64_cortex-a53 (OpenWrt ${owrt_version_suffix}) by GitHub Action" ./install.sh
           echo "Generated .run files:"
           ls -lh passwall_*.run
 
@@ -192,9 +219,8 @@ jobs:
           ls -lh makeself/passwall_*.run
 
       - name: Preparing release notes
-        id: prep_release_notes
         run: |
-          extra_content="![Github](https://img.shields.io/badge/Passwall.run-${{ env.LATEST_TAG }}-123456?logo=github&logoColor=fff&labelColor=green&style=for-the-badge) [![Github](https://img.shields.io/badge/国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge)](https://wkdaily.cpolar.top/archives/1) ![GitHub Downloads (all assets, specific tag)](https://img.shields.io/github/downloads/wukongdaily/RunFilesBuilder/${{ env.LATEST_TAG }}/total?style=for-the-badge&labelColor=black&color=%2325c2a0)"
+          extra_content="![Github](https://img.shields.io/badge/Passwall.run-${{ env.LATEST_TAG }}-123456?logo=github&logoColor=fff&labelColor=green&style=for-the-badge) [![Github](https://img.shields.io/badge/国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge)](https://wkdaily.cpolar.top/archives/1) ![GitHub Downloads (all assets, specific tag)](https://img.shields.io/github/downloads/${{ github.repository }}/${{ env.LATEST_TAG }}/total?style=for-the-badge&labelColor=black&color=%2325c2a0)"
           upstream_release_notes=$(curl -s https://api.github.com/repos/xiaorouji/openwrt-passwall/releases/tags/${{ env.LATEST_TAG }} | jq -r '.body')
           if [ -z "$upstream_release_notes" ] || [ "$upstream_release_notes" == "null" ]; then
             upstream_release_notes="No release notes available from upstream Passwall for tag ${{ env.LATEST_TAG }}."
@@ -204,15 +230,12 @@ jobs:
           cat release_notes.md
 
       - name: Create or Update GitHub Release
-        uses: softprops/action-gh-release@v2 # Using v2 for better features
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.LATEST_TAG }} # Tag in this repo will match upstream Passwall tag
-          name: "PassWall-${{ env.LATEST_TAG }}-OpenWrt${{ env.OPENWRT_VERSION_FROM_IPK }}" # Dynamic Release Title
+          tag_name: ${{ env.LATEST_TAG }}
+          name: "PassWall-${{ env.LATEST_TAG }}-OpenWrt${{ env.OPENWRT_VERSION_FOR_RELEASE }}"
           body_path: release_notes.md
           files: makeself/passwall_*.run
           prerelease: false
-          # target_commitish: ${{ github.ref_name }} # Default is github.sha, which is usually fine. Can specify branch if needed.
-          # draft: false # Set to true if you want to review before publishing
-          # fail_on_unmatched_files: true # Recommended
